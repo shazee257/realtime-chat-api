@@ -35,10 +35,10 @@ A simple, well-documented implementation of horizontally scalable WebSockets usi
 | Feature | Implementation |
 |---------|---------------|
 | **Any user can connect to any server** | Users connect via load balancer or directly to any server |
-| **Messages broadcast to all servers** | Redis Pub/Sub broadcasts to all subscribed servers |
+| **Messages broadcast to all servers** | Redis Pub/Sub (or Socket.io Redis Adapter) broadcasts to all servers |
 | **No missing messages** | Message history stored in Redis sorted set |
 | **Guaranteed delivery** | New users receive message history on join |
-| **Lower latency** | Direct WebSocket + in-memory Redis = minimal latency |
+| **Reliable Connectivity** | Socket.io handles reconnections and heartbeats automatically |
 
 ## 📁 Project Structure
 
@@ -47,7 +47,7 @@ src/
 ├── server.ts                    # Main entry point + Express app
 └── services/
     ├── redis-pubsub.ts          # Redis Pub/Sub service (cross-server messaging)
-    └── websocket-handler.ts     # WebSocket handler (client management)
+    └── websocket-handler.ts     # Socket.io handler (client management)
 ```
 
 ## 🚀 Quick Start
@@ -65,10 +65,6 @@ npm install
 
 # Start Redis (if using Docker)
 docker run -d -p 6379:6379 redis:latest
-
-# Or install Redis locally
-# macOS: brew install redis && redis-server
-# Ubuntu: sudo apt install redis-server && sudo systemctl start redis
 ```
 
 ### Running Multiple Servers
@@ -99,10 +95,10 @@ npm run dev:server3
 ### Message Flow
 
 ```
-1. User A (connected to Server 1) sends a message
+1. User A (connected to Server 1) sends a message via socket.emit('message')
            │
            ▼
-2. Server 1 receives the WebSocket message
+2. Server 1 receives the Socket.io message
            │
            ▼
 3. Server 1 does TWO things:
@@ -112,58 +108,21 @@ npm run dev:server3
            ▼
 4. Redis broadcasts to ALL subscribed servers
            │
-           ├──► Server 1 receives ──► Broadcasts to local clients (A, B)
-           ├──► Server 2 receives ──► Broadcasts to local clients (C, D)
-           └──► Server 3 receives ──► Broadcasts to local clients (E, F)
+           ├──► Server 1 receives ──► io.emit('message') to local clients
+           ├──► Server 2 receives ──► io.emit('message') to local clients
+           └──► Server 3 receives ──► io.emit('message') to local clients
            │
            ▼
 5. ALL users across ALL servers see the message!
 ```
 
-### Why Redis Pub/Sub?
+### Why Socket.io?
 
-Without Redis, each server only knows about its own connected clients:
-
-```
-❌ WITHOUT REDIS:
-   Server 1 clients can only see Server 1 messages
-   Server 2 clients can only see Server 2 messages
-   (Messages are isolated!)
-
-✅ WITH REDIS:
-   All servers subscribe to the same Redis channel
-   When any server publishes, ALL servers receive
-   Each server broadcasts to its local clients
-   (Messages are synchronized!)
-```
-
-### Deduplication
-
-Since the publishing server also receives its own message back from Redis, we track processed message IDs:
-
-```typescript
-private processedMessages: Set<string> = new Set();
-
-// When receiving from Redis:
-if (this.processedMessages.has(message.id)) {
-  return; // Skip - already processed
-}
-this.processedMessages.add(message.id);
-```
-
-### Guaranteed Delivery
-
-New users don't miss messages because:
-
-1. All messages are stored in Redis (sorted set with timestamp)
-2. When a user joins, they receive the last 50 messages
-3. The history is fetched from Redis, not from the server's memory
-
-```typescript
-// On user join:
-const history = await redis.getRecentMessages(50);
-client.send(JSON.stringify({ type: 'history', payload: { messages: history } }));
-```
+Compared to raw WebSockets (`ws`), Socket.io provides:
+1. **Automatic Reconnection**: If the server goes down, clients reconnect automatically.
+2. **Built-in Heartbeats**: No need to manually implement ping/pong.
+3. **Event-based API**: Cleaner code with `socket.on` and `socket.emit`.
+4. **Binary Support**: Native support for Buffers and typed arrays.
 
 ## 🔧 Configuration
 
@@ -177,52 +136,23 @@ client.send(JSON.stringify({ type: 'history', payload: { messages: history } }))
 | `REDIS_PORT` | `6379` | Redis port |
 | `REDIS_PASSWORD` | - | Redis password (optional) |
 
-### Example with Remote Redis
-
-```bash
-PORT=3001 \
-SERVER_ID=prod-server-1 \
-REDIS_HOST=redis.example.com \
-REDIS_PORT=6379 \
-REDIS_PASSWORD=secret \
-npm run start
-```
-
 ## 📡 API Reference
 
-### WebSocket Messages
+### Socket.io Events
 
 **Client → Server:**
 
-```typescript
-// Join the chat
-{ type: 'join', payload: { username: 'Alice' } }
-
-// Send a message
-{ type: 'message', payload: { content: 'Hello!' } }
-
-// Ping (keepalive)
-{ type: 'ping' }
-```
+- `join`: `{ username: 'Alice' }` - Join the chat
+- `message`: `{ content: 'Hello!' }` - Send a message
 
 **Server → Client:**
 
-```typescript
-// Join confirmation
-{ type: 'join', payload: { userId, username, serverId, message } }
-
-// Message history on join
-{ type: 'history', payload: { messages: [...], serverId } }
-
-// New message
-{ type: 'message', payload: { id, userId, username, content, timestamp, serverId } }
-
-// User left
-{ type: 'leave', payload: { userId, username, serverId, timestamp } }
-
-// Pong response
-{ type: 'pong' }
-```
+- `join_success`: `{ userId, username, serverId, message }` - Join confirmation
+- `history`: `{ messages: [...], serverId }` - Message history on join
+- `message`: `{ id, userId, username, content, timestamp, serverId }` - New message
+- `join`: `{ userId, username, serverId, timestamp }` - Other user joined
+- `leave`: `{ userId, username, serverId, timestamp }` - Other user left
+- `error_msg`: `{ message }` - Error notification
 
 ### REST Endpoints
 

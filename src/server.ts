@@ -54,78 +54,79 @@ const PORT = parseInt(process.env.PORT || '3001');
 const SERVER_ID = process.env.SERVER_ID || `server-${PORT}`;
 
 async function main() {
-    console.log('\n========================================');
-    console.log('   REALTIME CHAT SERVER');
-    console.log('   Horizontal WebSocket Scaling Demo');
-    console.log('========================================\n');
-    console.log(`Server ID: ${SERVER_ID}`);
-    console.log(`Port: ${PORT}`);
-    console.log('');
+  console.log('\n========================================');
+  console.log('   REALTIME CHAT SERVER');
+  console.log('   Horizontal WebSocket Scaling Demo');
+  console.log('========================================\n');
+  console.log(`Server ID: ${SERVER_ID}`);
+  console.log(`Port: ${PORT}`);
+  console.log('');
 
-    // 1. Create Express app
-    const app = express();
-    app.use(cors());
-    app.use(express.json());
+  // 1. Create Express app
+  const app = express();
+  app.use(cors());
+  app.use(express.json());
 
-    // 2. Create HTTP server (needed for WebSocket attachment)
-    const server = createServer(app);
+  // 2. Create HTTP server (needed for WebSocket attachment)
+  const server = createServer(app);
 
-    // 3. Initialize Redis Pub/Sub
-    const redis = new RedisPubSub(SERVER_ID);
-    await redis.subscribe();
-    console.log('[Server] Redis Pub/Sub initialized');
+  // 3. Initialize Redis Pub/Sub
+  const redis = new RedisPubSub(SERVER_ID);
+  await redis.subscribe();
+  console.log('[Server] Redis Pub/Sub initialized');
 
-    // 4. Initialize WebSocket handler
-    const wsHandler = new WebSocketHandler(server, redis);
-    console.log('[Server] WebSocket handler initialized');
+  // 4. Initialize Socket.io handler
+  const socketHandler = new WebSocketHandler(server, redis);
+  console.log('[Server] Socket.io handler initialized');
 
-    // ====================================
-    // HTTP ENDPOINTS
-    // ====================================
+  // ====================================
+  // HTTP ENDPOINTS
+  // ====================================
 
-    // Health check endpoint
-    app.get('/health', (req, res) => {
-        res.json({
-            status: 'healthy',
-            serverId: SERVER_ID,
-            port: PORT,
-            timestamp: new Date().toISOString(),
-            connectedClients: wsHandler.getClientCount(),
-            redis: redis.isReady() ? 'connected' : 'disconnected',
-        });
+  // Health check endpoint
+  app.get('/health', (req, res) => {
+    res.json({
+      status: 'healthy',
+      serverId: SERVER_ID,
+      port: PORT,
+      timestamp: new Date().toISOString(),
+      connectedClients: socketHandler.getClientCount(),
+      redis: redis.isReady() ? 'connected' : 'disconnected',
     });
+  });
 
-    // Get server info
-    app.get('/info', (req, res) => {
-        res.json({
-            serverId: SERVER_ID,
-            port: PORT,
-            connectedClients: wsHandler.getClientCount(),
-            uptime: process.uptime(),
-        });
+  // Get server info
+  app.get('/info', (req, res) => {
+    res.json({
+      serverId: SERVER_ID,
+      port: PORT,
+      connectedClients: socketHandler.getClientCount(),
+      uptime: process.uptime(),
     });
+  });
 
-    // Get recent messages (REST fallback)
-    app.get('/messages', async (req, res) => {
-        try {
-            const messages = await redis.getRecentMessages(50);
-            res.json({
-                messages,
-                count: messages.length,
-                serverId: SERVER_ID,
-            });
-        } catch (error) {
-            res.status(500).json({ error: 'Failed to fetch messages' });
-        }
-    });
+  // Get recent messages (REST fallback)
+  app.get('/messages', async (req, res) => {
+    try {
+      const messages = await redis.getRecentMessages(50);
+      res.json({
+        messages,
+        count: messages.length,
+        serverId: SERVER_ID,
+      });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to fetch messages' });
+    }
+  });
 
-    // Serve simple test client
-    app.get('/', (req, res) => {
-        res.send(`
+  // Serve simple test client
+  app.get('/', (req, res) => {
+    res.send(`
       <!DOCTYPE html>
       <html>
       <head>
         <title>Chat Server - ${SERVER_ID}</title>
+        <script src="/socket.io/socket.io.js"></script>
         <style>
           * { box-sizing: border-box; font-family: 'Segoe UI', sans-serif; }
           body { 
@@ -219,49 +220,52 @@ async function main() {
           </div>
         </div>
         <script>
-          let ws;
+          let socket;
           let joined = false;
 
           function connect() {
-            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(protocol + '//' + location.host);
+            socket = io({
+                reconnection: true,
+                reconnectionDelay: 1000,
+                reconnectionDelayMax: 5000,
+                reconnectionAttempts: Infinity
+            });
             
-            ws.onopen = () => {
+            socket.on('connect', () => {
               document.getElementById('status').textContent = 'Connected to ${SERVER_ID}';
               document.getElementById('status').className = 'status connected';
-            };
+            });
             
-            ws.onmessage = (event) => {
-              const data = JSON.parse(event.data);
-              handleMessage(data);
-            };
+            socket.on('history', (data) => {
+              data.messages.forEach(msg => {
+                addMessage(msg.content, msg.username, msg.serverId);
+              });
+            });
+
+            socket.on('join_success', (data) => {
+              addMessage('🎉 ' + data.message, 'System', '', true);
+            });
+
+            socket.on('message', (data) => {
+              addMessage(data.content, data.username, data.serverId);
+            });
+
+            socket.on('join', (data) => {
+              addMessage('✨ ' + data.username + ' joined the chat', 'System', data.serverId, true);
+            });
+
+            socket.on('leave', (data) => {
+              addMessage('👋 ' + data.username + ' left', 'System', data.serverId, true);
+            });
             
-            ws.onclose = () => {
+            socket.on('disconnect', () => {
               document.getElementById('status').textContent = 'Disconnected - Reconnecting...';
               document.getElementById('status').className = 'status disconnected';
-              setTimeout(connect, 2000);
-            };
-          }
+            });
 
-          function handleMessage(data) {
-            const messages = document.getElementById('messages');
-            
-            switch(data.type) {
-              case 'join':
-                addMessage('🎉 ' + data.payload.message, 'System', '', true);
-                break;
-              case 'history':
-                data.payload.messages.forEach(msg => {
-                  addMessage(msg.content, msg.username, msg.serverId);
-                });
-                break;
-              case 'message':
-                addMessage(data.payload.content, data.payload.username, data.payload.serverId);
-                break;
-              case 'leave':
-                addMessage('👋 ' + data.payload.username + ' left', 'System', data.payload.serverId, true);
-                break;
-            }
+            socket.on('error_msg', (data) => {
+                alert(data.message);
+            });
           }
 
           function addMessage(content, username, serverId, isSystem = false) {
@@ -281,10 +285,7 @@ async function main() {
             const username = document.getElementById('username').value.trim();
             if (!username) return alert('Please enter a username');
             
-            ws.send(JSON.stringify({
-              type: 'join',
-              payload: { username }
-            }));
+            socket.emit('join', { username });
             
             document.getElementById('username').disabled = true;
             document.getElementById('message').disabled = false;
@@ -299,10 +300,7 @@ async function main() {
             const content = input.value.trim();
             if (!content) return;
             
-            ws.send(JSON.stringify({
-              type: 'message',
-              payload: { content }
-            }));
+            socket.emit('message', { content });
             
             input.value = '';
           }
@@ -320,56 +318,56 @@ async function main() {
       </body>
       </html>
     `);
+  });
+
+  // ====================================
+  // START SERVER
+  // ====================================
+
+  server.listen(PORT, () => {
+    console.log('');
+    console.log('========================================');
+    console.log(`✅ Server ${SERVER_ID} running on port ${PORT}`);
+    console.log('========================================');
+    console.log('');
+    console.log('📡 Socket.io: http://localhost:' + PORT);
+    console.log('🌐 Web Client: http://localhost:' + PORT);
+    console.log('❤️  Health: http://localhost:' + PORT + '/health');
+    console.log('');
+    console.log('Try running multiple servers:');
+    console.log('  npm run dev:server1  (port 3001)');
+    console.log('  npm run dev:server2  (port 3002)');
+    console.log('  npm run dev:server3  (port 3003)');
+    console.log('');
+  });
+
+  // ====================================
+  // GRACEFUL SHUTDOWN
+  // ====================================
+
+  process.on('SIGTERM', async () => {
+    console.log('\n[Server] Shutting down gracefully...');
+    await socketHandler.close();
+    await redis.disconnect();
+    server.close(() => {
+      console.log('[Server] Goodbye!');
+      process.exit(0);
     });
+  });
 
-    // ====================================
-    // START SERVER
-    // ====================================
-
-    server.listen(PORT, () => {
-        console.log('');
-        console.log('========================================');
-        console.log(`✅ Server ${SERVER_ID} running on port ${PORT}`);
-        console.log('========================================');
-        console.log('');
-        console.log('📡 WebSocket: ws://localhost:' + PORT);
-        console.log('🌐 Web Client: http://localhost:' + PORT);
-        console.log('❤️  Health: http://localhost:' + PORT + '/health');
-        console.log('');
-        console.log('Try running multiple servers:');
-        console.log('  npm run dev:server1  (port 3001)');
-        console.log('  npm run dev:server2  (port 3002)');
-        console.log('  npm run dev:server3  (port 3003)');
-        console.log('');
+  process.on('SIGINT', async () => {
+    console.log('\n[Server] Shutting down gracefully...');
+    await socketHandler.close();
+    await redis.disconnect();
+    server.close(() => {
+      console.log('[Server] Goodbye!');
+      process.exit(0);
     });
-
-    // ====================================
-    // GRACEFUL SHUTDOWN
-    // ====================================
-
-    process.on('SIGTERM', async () => {
-        console.log('\n[Server] Shutting down gracefully...');
-        await wsHandler.close();
-        await redis.disconnect();
-        server.close(() => {
-            console.log('[Server] Goodbye!');
-            process.exit(0);
-        });
-    });
-
-    process.on('SIGINT', async () => {
-        console.log('\n[Server] Shutting down gracefully...');
-        await wsHandler.close();
-        await redis.disconnect();
-        server.close(() => {
-            console.log('[Server] Goodbye!');
-            process.exit(0);
-        });
-    });
+  });
 }
 
 // Run the server
 main().catch((error) => {
-    console.error('[Server] Failed to start:', error);
-    process.exit(1);
+  console.error('[Server] Failed to start:', error);
+  process.exit(1);
 });
